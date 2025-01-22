@@ -19,8 +19,9 @@ import java.util.Arrays;
  * Parallel processing:                           ~1200 ms  — traversing forward byte by byte
  * Change read direction:                         ~1200 ms  — no change but code is much cleaner
  * Read 24 bytes at a time via SWAR token checks: ~800 ms   — Big impact! The real run is 33% faster, even IntelliJ profiler shows worse. Don't trust IntelliJ!
+ * Skip redundant bytes:                          ~670 ms — Another kill! 16% faster after skipping minimum search string amount. 
  * ?
- *
+ * 
  * Testing on JDK 21.0.5-graal JIT compiler (no native)
  *
  * Big thanks to Mike, for bringing this challenge.
@@ -30,6 +31,12 @@ import java.util.Arrays;
 public class Main {
 
   private static final Path DATA_FILE = Path.of("pool.csv");
+
+  // Search String: 
+  // Ex: ;1;1;1;1;1;1 - min: 12, max: 18 including the first ';'
+  // Considering there will be never empty names, min 1 chars: 12 + 1 = 13
+  // We use this to skip some extra bytes
+  private static final int MIN_SEARCH_INPUT = 13;  
 
   private static void printName(MemorySegment segment, long start, long end) {
     final ByteBuffer buffer = segment.asSlice(start, end - start).asByteBuffer();
@@ -125,7 +132,7 @@ public class Main {
           final long end = position - this.searchSize + 1;
           printName(this.segment, start, end);
         }
-        position = findPreviousLinebreak(this.segment, position, this.start) - 1;
+        position = findPreviousLinebreak(this.segment, position - MIN_SEARCH_INPUT, this.start) - 1;
       }
     }
   }
