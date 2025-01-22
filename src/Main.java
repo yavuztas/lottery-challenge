@@ -1,7 +1,7 @@
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-import java.lang.foreign.Arena;
-import java.lang.foreign.MemorySegment;
+import java.lang.forei//gn.Arena;
+import java.lang.forei//gn.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -19,7 +19,8 @@ import java.util.Arrays;
  * Parallel processing:                           ~1200 ms  — traversing forward byte by byte
  * Change read direction:                         ~1200 ms  — no change but code is much cleaner
  * Read 24 bytes at a time via SWAR token checks: ~800 ms   — Big impact! The real run is 33% faster, even IntelliJ profiler shows worse. Don't trust IntelliJ!
- * Skip redundant bytes:                          ~670 ms — Another kill! 16% faster after skipping minimum search string amount. 
+ * Skip redundant bytes:                          ~670 ms   — Another kill! 16% faster after skipping minimum search string amount. 
+ * Compare by longs:                              ~600 ms   — Instead of byte scanning we scan long and ints to improve speed. +10% faster
  * ?
  * 
  * Testing on JDK 21.0.5-graal JIT compiler (no native)
@@ -100,6 +101,38 @@ public class Main {
     return true;
   }
 
+  private static boolean compare2(MemorySegment segment, long offset, MemorySegment search) {
+    long segmentStart = offset;
+    long pos = search.byteSize() - 1;
+
+    // safely read 8 + 4 = 12 bytes without looping since the search string is minimum 12
+    final long long1 = search.get(ValueLayout.JAVA_LONG_UNALIGNED, pos - 8);
+    final long long2 = segment.get(ValueLayout.JAVA_LONG_UNALIGNED, segmentStart - 8);
+    final int int1 = search.get(ValueLayout.JAVA_INT_UNALIGNED, pos - 12);
+    final int int2 = segment.get(ValueLayout.JAVA_INT_UNALIGNED, segmentStart - 12);
+    
+    if (long1 != long2) { // mismatch
+      return false;
+    }
+
+    if (int1 != int2) { // mismatch
+      return false;
+    }
+
+    // TODO limit segment?
+    // scan the rest byte by byte
+    for (long i = pos - 12; i >= 0; i--) {
+      final byte b1 = search.get(ValueLayout.JAVA_BYTE, i);
+      final byte b2 = segment.get(ValueLayout.JAVA_BYTE, segmentStart);
+      if (b1 != b2) { // mismatch
+        return false;
+      }
+      segmentStart--;
+    }
+
+    return true;
+  }
+
   static class RegionWorker extends Thread {
 
     final MemorySegment segment;
@@ -127,7 +160,7 @@ public class Main {
       // scan the segment reverse
       long position = this.end - 1; // skip the linebreak at the end
       while (position > this.start) {
-        if (compare(this.segment, position, this.search)) { // found a match
+        if (compare2(this.segment, position, this.search)) { // found a match
           final long start = findPreviousLinebreak(this.segment, position) + 1;
           final long end = position - this.searchSize + 1;
           printName(this.segment, start, end);
