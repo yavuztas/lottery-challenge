@@ -60,10 +60,10 @@ public class Main {
   private static long findPreviousLinebreak(MemorySegment memory, long offset, long limit) {
     long position = offset;
     // read long by long until the next long contains a semicolon
-    while (position - 24 > limit) {
+    while (position - 16 > limit) {
       final long hasVal1 = linebreakPos(memory.get(ValueLayout.JAVA_LONG_UNALIGNED, position - 8));
       final long hasVal2 = linebreakPos(memory.get(ValueLayout.JAVA_LONG_UNALIGNED, position - 16));
-      final long hasVal3 = linebreakPos(memory.get(ValueLayout.JAVA_LONG_UNALIGNED, position - 24));
+      // reading more doesn't improve
 
       if (hasVal1 != 8) {
         return position - 8 + hasVal1;
@@ -71,11 +71,8 @@ public class Main {
       if (hasVal2 != 8) {
         return position - 16 + hasVal2;
       }
-      if (hasVal3 != 8) {
-        return position - 24 + hasVal3;
-      }
 
-      position -= 24; // 24 bytes at a time
+      position -= 16; // 16 bytes at a time
     }
     // read leftovers byte by byte
     return findPreviousLinebreak(memory, position);
