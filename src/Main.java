@@ -1,3 +1,5 @@
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -9,6 +11,22 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 
+
+/**
+ * Changelog:
+ *
+ * Initial:                                       ~8000 ms  — strangely unstable because of IntelliJ profiler, later switched on hyperfine
+ * Parallel processing:                           ~1200 ms  — traversing forward byte by byte
+ * Change read direction:                         ~1200 ms  — no change but code is much cleaner
+ * Read 24 bytes at a time via SWAR token checks: ~800 ms   — Big impact! The real run is 33% faster, even IntelliJ profiler shows worse. Don't trust IntelliJ!
+ * ?
+ *
+ * Testing on JDK 21.0.5-graal JIT compiler (no native)
+ *
+ * Big thanks to Mike, for bringing this challenge.
+ *
+ * Follow me at: github.com/yavuztas
+ */
 public class Main {
 
   private static final Path DATA_FILE = Path.of("pool.csv");
@@ -17,7 +35,7 @@ public class Main {
     final ByteBuffer buffer = segment.asSlice(start, end - start).asByteBuffer();
     final byte[] bytes = new byte[(int) (end - start)];
     buffer.get(bytes);
-    System.out.println(new String(bytes));
+    System.out.println(new String(bytes, UTF_8));
   }
 
   private static long findPreviousLinebreak(MemorySegment segment, long offset) {
@@ -29,6 +47,40 @@ public class Main {
     }
     return position;
   }
+
+  // hasvalue & haszero
+  // adapted from https://graphics.stanford.edu/~seander/bithacks.html#ZeroInWord
+  // returns [0-7] otherwise 8 when no match
+  private static int linebreakPos(long word) {
+    // // hasvalue
+    final long hasVal = word ^ 0xa0a0a0a0a0a0a0aL; // semicolon pattern
+    return Long.numberOfTrailingZeros(((hasVal - 0x0101010101010101L) & ~hasVal & 0x8080808080808080L)) >>> 3; // haszero
+  }
+
+  private static long findPreviousLinebreak(MemorySegment memory, long offset, long limit) {
+    long position = offset;
+    // read long by long until the next long contains a semicolon
+    while (position - 24 > limit) {
+      final long hasVal1 = linebreakPos(memory.get(ValueLayout.JAVA_LONG_UNALIGNED, position - 8));
+      final long hasVal2 = linebreakPos(memory.get(ValueLayout.JAVA_LONG_UNALIGNED, position - 16));
+      final long hasVal3 = linebreakPos(memory.get(ValueLayout.JAVA_LONG_UNALIGNED, position - 24));
+
+      if (hasVal1 != 8) {
+        return position - 8 + hasVal1;
+      }
+      if (hasVal2 != 8) {
+        return position - 16 + hasVal2;
+      }
+      if (hasVal3 != 8) {
+        return position - 24 + hasVal3;
+      }
+
+      position -= 24; // 24 bytes at a time
+    }
+    // read leftovers byte by byte
+    return findPreviousLinebreak(memory, position);
+  }
+
 
   private static boolean compare(MemorySegment segment, long offset, MemorySegment search) {
     long segmentStart = offset;
@@ -76,7 +128,7 @@ public class Main {
           final long end = position - this.searchSize + 1;
           printName(this.segment, start, end);
         }
-        position = findPreviousLinebreak(this.segment, position) - 1;
+        position = findPreviousLinebreak(this.segment, position, this.start) - 1;
       }
     }
   }
