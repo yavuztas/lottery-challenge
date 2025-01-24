@@ -173,7 +173,7 @@ public class Main {
     final byte[] bytes = (";" + numbers).getBytes(); // prepend ';' match correctly
     final TokenizedSearchInput searchInput = new TokenizedSearchInput(bytes);
 
-    var concurrency = 8; //* Runtime.getRuntime().availableProcessors();
+    var concurrency = 2 * Runtime.getRuntime().availableProcessors();
     final long fileSize = Files.size(DATA_FILE);
     long regionSize = fileSize / concurrency;
 
