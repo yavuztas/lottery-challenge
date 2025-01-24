@@ -3,9 +3,10 @@ Install JDK using sdk man:
 ```
 sdk install java 21.0.5-graal
 ```
-Install hyperfine:
+Install hyperfine and coreutils (for gtimeout):
 ```
 brew install hyperfine
+brew install coreutils
 ```
 Copy `pool.csv` file into the project's root directory.
 
