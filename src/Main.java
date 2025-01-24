@@ -102,12 +102,6 @@ public class Main {
 
   static class TokenizedSearchInput {
 
-    // Search String:
-    // Ex: ;1;1;1;1;1;1 - min: 12, max: 18 including the first ';'
-    // Considering there will be never empty names, min 1 chars: 12 + 1 = 13
-    // We use this to skip some extra bytes
-    static final int MIN_SEARCH_INPUT = 13;
-
     final int size;
     final byte[] bytes;
 
@@ -192,22 +186,16 @@ public class Main {
     final MemorySegment memory = channel.map(MapMode.READ_ONLY, segmentStart, fileSize, Arena.global());
 
     if (concurrency == 1) { // shortcut for single-thread mode
-      new RegionWorker(memory, segmentStart, fileSize - 1, searchInput).start();
+      new RegionWorker(memory, segmentStart, fileSize, searchInput).start();
       return;
     }
 
     // calculate boundaries for regions
-    for (int i = 0; i < concurrency; i++) {
-      final long segmentSize = (segmentStart + regionSize > fileSize) ? fileSize - segmentStart : regionSize;
-      // shift position to the next until we find a linebreak
-      long segmentEnd = findNextLineBreak(memory, segmentStart + segmentSize); // last byte of a region is always a '\n'
-      // calculate last segment
-      if (i + 1 == concurrency && segmentEnd < fileSize) {
-        segmentEnd = fileSize - 1;
-      }
-      new RegionWorker(memory, segmentStart, segmentEnd, searchInput).start(); // start processing
-      segmentStart += segmentSize;
+    for (int i = 0; i < concurrency - 1; i++) {
+      new RegionWorker(memory, segmentStart, segmentStart + regionSize, searchInput).start(); // start processing
+      segmentStart += regionSize;
     }
+    new RegionWorker(memory, segmentStart, fileSize, searchInput).start(); // last piece
   }
 
 }
