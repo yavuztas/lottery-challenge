@@ -1,7 +1,7 @@
 #!/bin/bash
 
 JAVA_VERSION="21.0.5-graal"
-INPUT_ARGS="9 13 40 34 17 7"
+INPUT_ARGS="9 13 40 34 17 7" # 9 13 40 34 17 7
 
 # java compile
 "$HOME"/.sdkman/candidates/java/$JAVA_VERSION/bin/javac --release 21 --enable-preview -d ./bin ./src/Main.java
@@ -11,22 +11,20 @@ shift $((OPTIND - 1))
 param1=$1
 
 if [ "$param1" == "--native" ]; then
-    NATIVE_IMAGE_OPTS="--initialize-at-build-time=Main --gc=epsilon -O3 -march=native -R:MaxHeapSize=128m -H:-GenLoopSafepoints --enable-preview"
-    native-image $NATIVE_IMAGE_OPTS -cp ./bin Main
+    NATIVE_IMAGE_OPTS="--initialize-at-build-time=MainUnsafe --gc=epsilon -O3 -march=native -R:MaxHeapSize=128m -H:-GenLoopSafepoints --enable-preview"
+    native-image $NATIVE_IMAGE_OPTS -cp ./bin MainUnsafe
 fi
 
 TIMEOUT="gtimeout -v 30" # in seconds, from `brew install coreutils`
-HYPERFINE_OPTS="--warmup 5 --runs 5 --export-json timing.json --output ./main.out"
+HYPERFINE_OPTS="--warmup 5 --runs 5 --export-json timing.json --output ./main.out" # --show-output 
 
 if [ "$param1" == "--native" ]; then
-    echo "Picking up existing native image './main', delete the file to select JVM mode." 1>&2
-    hyperfine $HYPERFINE_OPTS "$TIMEOUT ./main $INPUT_ARGS"
+    echo "Picking up existing native image './mainunsafe', delete the file to select JVM mode." 1>&2
+    hyperfine $HYPERFINE_OPTS "$TIMEOUT ./mainunsafe $INPUT_ARGS"
 else
     JAVA_OPTS="-Xmx64m --enable-preview"
     echo "Choosing to run the app in JVM mode as no native image was found" 1>&2
     hyperfine $HYPERFINE_OPTS "$TIMEOUT sh -c '$HOME/.sdkman/candidates/java/$JAVA_VERSION/bin/java $JAVA_OPTS -classpath ./bin Main $INPUT_ARGS'"
 fi
 
-
-
-
+# 10596688547
