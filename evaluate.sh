@@ -11,7 +11,6 @@ shift $((OPTIND - 1))
 param1=$1
 
 if [ "$param1" == "--native" ]; then
-#    NATIVE_IMAGE_OPTS="--initialize-at-build-time=Main --gc=epsilon -O3 -march=native -R:MaxHeapSize=128m -H:-GenLoopSafepoints --enable-preview"
     NATIVE_IMAGE_OPTS="--initialize-at-build-time=Main --gc=epsilon -O3 -march=native -R:MaxHeapSize=128m -H:-GenLoopSafepoints --enable-preview"
     native-image $NATIVE_IMAGE_OPTS -cp ./bin Main
 fi

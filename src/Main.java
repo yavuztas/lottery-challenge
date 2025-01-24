@@ -20,7 +20,7 @@ import java.nio.file.StandardOpenOption;
  * Read 24 bytes at a time via SWAR token checks: ~800 ms   — Big impact! The real run is 33% faster, even IntelliJ profiler shows worse. Don't trust IntelliJ!
  * Skip redundant bytes:                          ~670 ms   — Another kill! 16% faster after skipping minimum search string amount.
  * Compare by longs:                              ~620 ms   — Instead of byte scanning we scan long and ints to improve speed. 7% faster
- * ?
+ * Refactor main loop, constant loop count:       ~575 ms   - Loop count is always size/8 now, this way compiler can unroll the loop better
  *
  * Testing on JDK 21.0.5-graal JIT compiler (no native)
  *
@@ -49,6 +49,14 @@ public class Main {
     return position;
   }
 
+  private static long findNextLineBreak(MemorySegment memory, long offset) {
+    long position = offset;
+    while (memory.get(ValueLayout.JAVA_BYTE, position) != '\n') { // read until a linebreak
+      position++;
+    }
+    return position;
+  }
+
   // hasvalue & haszero
   // adapted from https://graphics.stanford.edu/~seander/bithacks.html#ZeroInWord
   // returns [0-7] otherwise 8 when no match
@@ -58,45 +66,8 @@ public class Main {
     return Long.numberOfTrailingZeros(((hasVal - 0x0101010101010101L) & ~hasVal & 0x8080808080808080L)) >>> 3; // haszero
   }
 
-  private static long findPreviousLinebreak(MemorySegment memory, long offset, long limit) {
-    long position = offset;
-    // read long by long until the next long contains a semicolon
-    while (position - 16 > limit) {
-      final long hasVal1 = linebreakPos(memory.get(ValueLayout.JAVA_LONG_UNALIGNED, position - 8));
-      final long hasVal2 = linebreakPos(memory.get(ValueLayout.JAVA_LONG_UNALIGNED, position - 16));
-      // reading more doesn't improve
-
-      if (hasVal1 != 8) {
-        return position - 8 + hasVal1;
-      }
-      if (hasVal2 != 8) {
-        return position - 16 + hasVal2;
-      }
-
-      // TODO do compare here inline?
-
-      position -= 16; // 16 bytes at a time
-    }
-    // read leftovers byte by byte
-    return findPreviousLinebreak(memory, position);
-  }
-
   private static boolean compare(MemorySegment segment, long offset, TokenizedSearchInput search) {
     long segmentStart = offset;
-    for (int i = search.size - 1; i >= 0; i--) {
-      final byte b1 = search.bytes[i];
-      final byte b2 = segment.get(ValueLayout.JAVA_BYTE, segmentStart);
-      if (b1 != b2) { // mismatch
-        return false;
-      }
-      segmentStart--;
-    }
-
-    return true;
-  }
-
-  private static boolean compare2(MemorySegment segment, long offset, TokenizedSearchInput search) {
-    long segmentStart = offset + 1;
     int pos = search.size;
 
     // safely read 8 + 4 = 12 bytes without looping since the search string is minimum 12
@@ -111,18 +82,18 @@ public class Main {
     if (int1 != int2) { // mismatch
       return false;
     }
-
+    // udpate positions
     segmentStart -= 13;
     pos -= 13;
-
     // scan the rest byte by byte
     while (pos >= 0) {
-      final byte b1 = search.bytes[pos--];
+      final byte b1 = search.bytes[pos];
       // TODO boundery check for segment?
       final byte b2 = segment.get(ValueLayout.JAVA_BYTE, segmentStart);
       if (b1 != b2) { // mismatch
         return false;
       }
+      pos--;
       segmentStart--;
     }
 
@@ -174,25 +145,24 @@ public class Main {
       // System.out.printf("Thread: %s, last byte is line break?: %s%n", Thread.currentThread().getName(), lastByte == '\n');
       // System.out.printf("Thread: %s, last byte: %s%n", Thread.currentThread().getName(), new String(new byte[] { lastByte }));
 
-      // scan the segment reverse
-      long position = this.end - 1; // skip the linebreak at the end
-      while (position > this.start) {
-        if (compare2(this.segment, position, this.searchInput)) { // found a match
-          final long start = findPreviousLinebreak(this.segment, position) + 1;
-          final long end = position - this.searchInput.size + 1;
+      long lineBreakPos = this.end;
+      long position = this.end; // scan the segment reverse
+      final long loopCount = (this.end - this.start) / 8; // 8 bytes at a time
+      for (int i = 0; i < loopCount; i++) {
+        // there maybe redundant checks here because the linebreak position is not found always
+        // instead of adding more branches in hotspot we leave it here since compiler can optimize it well,
+        // and it's faster due to instruction level parallelism
+        if (compare(this.segment, lineBreakPos, this.searchInput)) { // found a match
+          final long start = findPreviousLinebreak(this.segment, lineBreakPos - 1) + 1;
+          final long end = lineBreakPos - this.searchInput.size;
           printName(this.segment, start, end);
         }
-        position = findPreviousLinebreak(this.segment, position - TokenizedSearchInput.MIN_SEARCH_INPUT, this.start) - 1;
+        position = position - 8; // move pointer 8 bytes to the back
+        final long word = this.segment.get(ValueLayout.JAVA_LONG_UNALIGNED, position); // read a word of 8 bytes each time
+        final long relativePos = linebreakPos(word); // linebreak position in the word, if not returns 8
+        lineBreakPos = position + relativePos;
       }
     }
-  }
-
-  private static long findNextLineBreak(MemorySegment memory, long offset) {
-    long position = offset;
-    while (memory.get(ValueLayout.JAVA_BYTE, position) != '\n') { // read until a linebreak
-      position++;
-    }
-    return position;
   }
 
   public static void main(String[] args) throws Exception {
