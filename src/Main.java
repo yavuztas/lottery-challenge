@@ -22,7 +22,7 @@ import java.nio.file.StandardOpenOption;
  * Compare by longs:                              ~620 ms   — Instead of byte scanning we scan long and ints to improve speed. 7% faster
  * Refactor main loop, constant loop count:       ~575 ms   - Loop count is always size/8 now, this way compiler can unroll the loop better
  *
- * Testing on JDK 21.0.5-graal JIT compiler (no native)
+ * Testing on JDK 21.0.5-graal JIT compiler (no native), limiting to 8 threads.
  *
  * Big thanks to Mike, for bringing this challenge.
  *
@@ -144,20 +144,21 @@ public class Main {
       // final byte lastByte = this.segment.get(ValueLayout.JAVA_BYTE, this.end);
       // System.out.printf("Thread: %s, last byte is line break?: %s%n", Thread.currentThread().getName(), lastByte == '\n');
       // System.out.printf("Thread: %s, last byte: %s%n", Thread.currentThread().getName(), new String(new byte[] { lastByte }));
-
       long lineBreakPos = this.end;
       long position = this.end; // scan the segment reverse
       final long loopCount = (this.end - this.start) / 8; // 8 bytes at a time
       for (int i = 0; i < loopCount; i++) {
-        // there maybe redundant checks here because the linebreak position is not found always
-        // instead of adding more branches in hotspot we leave it here since compiler can optimize it well,
+        // there maybe redundant checks here because the linebreak position is not always correct
+        // when no linebreak match relativePos will be 8. In such cases found line break positions will be duplicated.
+        // Therefore, this can produce duplicated winners.
+        // However, instead of adding more branches in hotspot we leave it here since compiler can optimize it much better,
         // and it's faster due to instruction level parallelism
         if (compare(this.segment, lineBreakPos, this.searchInput)) { // found a match
           final long start = findPreviousLinebreak(this.segment, lineBreakPos - 1) + 1;
           final long end = lineBreakPos - this.searchInput.size;
           printName(this.segment, start, end);
         }
-        position = position - 8; // move pointer 8 bytes to the back
+        position -= 8; // move pointer 8 bytes to the back
         final long word = this.segment.get(ValueLayout.JAVA_LONG_UNALIGNED, position); // read a word of 8 bytes each time
         final long relativePos = linebreakPos(word); // linebreak position in the word, if not returns 8
         lineBreakPos = position + relativePos;
