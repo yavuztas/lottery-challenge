@@ -252,7 +252,7 @@ public class Main {
     // Since we do it only once at startup it's no impact on performance
     generatePermutations(args);
 
-    var concurrency = 8; //2 * Runtime.getRuntime().availableProcessors();
+    var concurrency = 2 * Runtime.getRuntime().availableProcessors();
     final long fileSize = Files.size(DATA_FILE);
     long regionSize = fileSize / concurrency;
 
