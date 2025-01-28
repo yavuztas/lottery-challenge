@@ -192,7 +192,7 @@ public class Main {
       // System.out.printf("Thread: %s, last byte is line break?: %s%n", Thread.currentThread().getName(), lastByte == '\n');
       // System.out.printf("Thread: %s, last byte: %s%n", Thread.currentThread().getName(), new String(new byte[] { lastByte }));
       long word;
-      long relativePos;
+      long relativePos = -1;
       long lineBreakPos = this.end;
       long position = this.end; // scan the segment reverse
       final long loopCount = (this.end - this.start) / 8; // 8 bytes at a time
@@ -202,15 +202,17 @@ public class Main {
         // Therefore, this can produce duplicated winners.
         // However, instead of adding more branches in hotspot we leave it here since compiler can optimize it much better,
         // and it's faster due to instruction level parallelism
-        if (compare(this.segment, lineBreakPos, this.searchInput, this.inputLength)) { // found a match
+        if (relativePos !=8 && compare(this.segment, lineBreakPos, this.searchInput, this.inputLength)) { // found a match
           final long start = findPreviousLinebreak(this.segment, lineBreakPos - 1) + 1;
           final long end = lineBreakPos - this.inputLength;
           printName(this.segment, start, end);
         }
-        position -= 8; // move pointer 8 bytes to the back
-        word = this.segment.get(ValueLayout.JAVA_LONG_UNALIGNED, position); // read a word of 8 bytes each time
+        
+        word = this.segment.get(ValueLayout.JAVA_LONG_UNALIGNED, position - 8); // read a word of 8 bytes each time
         relativePos = linebreakPos(word); // linebreak position in the word, if not returns 8
-        lineBreakPos = position + relativePos;
+        lineBreakPos = position - 8 + relativePos;
+
+        position -= 8; // move pointer 8 bytes to the back
       }
     }
   }
