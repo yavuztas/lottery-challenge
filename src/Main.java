@@ -26,6 +26,7 @@ import java.util.Arrays;
  * Implement a lookup table, calculate possible permitations at startup:
  *  - Use lookup table to compare in o(1)                                 ~1400ms   - Still hoping to get under 1 seconds, improving...
  * Custom Set implementation to eleminate extra checks                    ~950ms    - Eleminating extra checks helped a lot, back under 1 second!
+ * Increase bucket size, adjust JVM options                               ~870ms    - increasing bucket size from 16K to 256K eleminates collisions (almost) and gives us ~80ms bonus
  *
  *
  * Testing on JDK 21.0.5-graal JIT compiler (no native), limiting to 8 threads.
@@ -79,7 +80,7 @@ public class Main {
   static final class InputSet {
 
     // Bigger bucket size less collisions, but you have to find a sweet spot otherwise it becomes slower.
-    private static final int SIZE = 1 << 14; // 16kb
+    private static final int SIZE = 1 << 18; // 256kb
     private static final int BITMASK = SIZE - 1;
     private final TokenizedSearchInput[] values = new TokenizedSearchInput[SIZE];
 
