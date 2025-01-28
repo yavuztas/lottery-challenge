@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Arrays;
 import sun.misc.Unsafe;
 
 
@@ -17,11 +18,11 @@ import sun.misc.Unsafe;
  * Do not use in production :)
  *
  * Testing on JDK 21.0.5-graal, Mac M4 ARM 10 Core CPU: 768K L1i, 512K L1d, 64MB L2, 8MB System Level Cache
- * 
+ *
  * JIT compiler (no native), 8 cores    : 538 ms
- * JIT compiler (no native), 10 cores   : 428 ms
+ * JIT compiler (no native), 10 cores   : 688 ms
  * Graalvm Native image, 8 cores        : 390 ms
- * Graalvm Native image, 10 cores       : 347 ms
+ * Graalvm Native image, 10 cores       : 540 ms
  *
  * Big thanks to Mike, for bringing this challenge.
  *
@@ -69,55 +70,107 @@ public class MainUnsafe {
     return Long.numberOfTrailingZeros(((hasVal - 0x0101010101010101L) & ~hasVal & 0x8080808080808080L)) >>> 3; // haszero
   }
 
-  private static boolean compare(long offset, TokenizedSearchInput search) {
-    long segmentStart = offset;
-    int pos = search.size;
+  static final InputSet inputSet = new InputSet();
 
-    // safely read 8 + 4 = 12 bytes without looping since the search string is minimum 12
-    final long long1 = search.firstLong;
-    final long long2 = UNSAFE.getLong(segmentStart - 8);
-    if (long1 != long2) { // mismatch
-      return false;
+  private static boolean compare(long offset, TokenizedSearchInput searchInput, int inputLength) {
+    // get the first 2 bytes, this includes the first ';' as well
+    final short firstShort = UNSAFE.getShort( offset - inputLength); // read 2 bytes
+    final long firstLong = UNSAFE.getLong(offset - 8); // first long from backwards
+    final long secondLong = UNSAFE.getLong(offset - inputLength + 2); // second long from backwards
+
+    // reuse search input and check it from lookup cache
+    return inputSet.contains(searchInput.reset(firstShort, firstLong, secondLong));
+  }
+
+  // Custome Set on purpose, less possible checks
+  static final class InputSet {
+
+    // Bigger bucket size less collisions, but you have to find a sweet spot otherwise it becomes slower.
+    private static final int SIZE = 1 << 18; // 256kb
+    private static final int BITMASK = SIZE - 1;
+    private final TokenizedSearchInput[] values = new TokenizedSearchInput[SIZE];
+
+    private static int hashBucket(int hash) {
+      hash = hash ^ (hash >>> 16); // naive bit spreading but surprisingly decreases collision :)
+      return hash & BITMASK; // fast modulo, to find bucket
     }
 
-    final int int1 = search.secondInt;
-    final int int2 = UNSAFE.getInt(segmentStart - 12);
-    if (int1 != int2) { // mismatch
-      return false;
+    void add(TokenizedSearchInput input) {
+      final int bucket = hashBucket(input.hashCode());
+      TokenizedSearchInput existing = this.values[bucket];
+      if (existing == null) {
+        this.values[bucket] = input;
+        return;
+      }
+      // collision, linear probing to find a slot
+      // NOTE: here we don't do equals check on purpose since we don't add the same input twice
+      // If we do same input will be added twice but we don't, never :)
+      while (existing.next != null) {
+        existing = existing.next;
+      }
+      existing.next = input;
     }
-    // udpate positions
-    segmentStart -= 13;
-    pos -= 13;
-    // scan the rest byte by byte
-    while (pos >= 0) {
-      final byte b1 = search.bytes[pos];
-      // TODO boundery check for segment?
-      final byte b2 = UNSAFE.getByte(segmentStart);
-      if (b1 != b2) { // mismatch
+
+    boolean contains(TokenizedSearchInput input) {
+      final int bucket = hashBucket(input.hashCode());
+      TokenizedSearchInput existing = this.values[bucket];
+      if (existing == null) {
         return false;
       }
-      pos--;
-      segmentStart--;
-    }
 
-    return true;
+      boolean contains = false;
+      while (!contains && existing != null) {
+        contains = existing.equals(input);
+        existing = existing.next;
+      }
+      return contains;
+    }
   }
 
   static class TokenizedSearchInput {
 
-    final int size;
-    final byte[] bytes;
+    // linked list for collisions
+    TokenizedSearchInput next;
 
-    // cache the first 12 byte: long + int
-    final long firstLong;
-    final int secondInt;
+    // split bytes into 2 + 8 + 8 (short, long, long)
+    short firstShort;
+    long firstLong;
+    long secondLong;
+
+    public TokenizedSearchInput() {
+      this.firstShort = 0;
+      this.firstLong = 0;
+      this.secondLong = 0;
+    }
 
     public TokenizedSearchInput(byte[] bytes) {
       final MemorySegment segment = MemorySegment.ofArray(bytes);
-      this.size = bytes.length;
-      this.bytes = bytes;
-      this.firstLong = segment.get(ValueLayout.JAVA_LONG_UNALIGNED, this.size - 8); // from backwards
-      this.secondInt = segment.get(ValueLayout.JAVA_INT_UNALIGNED, this.size - 12); // from backwards
+      this.firstShort = segment.get(ValueLayout.JAVA_SHORT_UNALIGNED, 0); // first 2 bytes excluding empty bytes
+      this.firstLong = segment.get(ValueLayout.JAVA_LONG_UNALIGNED, bytes.length - 8); // from backwards
+      this.secondLong = segment.get(ValueLayout.JAVA_LONG_UNALIGNED, 2); // right after first 2 bytes
+    }
+
+    TokenizedSearchInput reset(short firstShort, long firstLong, long secondLong) {
+      this.firstShort = firstShort;
+      this.firstLong = firstLong;
+      this.secondLong = secondLong;
+      return this;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      final TokenizedSearchInput that = (TokenizedSearchInput) o;
+      return this.firstShort == that.firstShort && this.firstLong == that.firstLong && this.secondLong == that.secondLong;
+    }
+
+    @Override
+    public int hashCode() {
+      int result = 1;
+      // mersenne prime 31
+      result = ((result << 5) - result) + this.firstShort;
+      result = ((result << 5) - result) + Long.hashCode(this.firstLong);
+      result = ((result << 5) - result) + Long.hashCode(this.secondLong);
+      return result;
     }
   }
 
@@ -126,48 +179,84 @@ public class MainUnsafe {
     final long address;
     final long start;
     final long end;
-    final TokenizedSearchInput searchInput;
 
-    public RegionWorker(long address, long start, long end, TokenizedSearchInput input) {
+    final TokenizedSearchInput searchInput = new TokenizedSearchInput();
+    final int inputLength;
+
+    public RegionWorker(long address, long start, long end, int inputLength) {
       this.address = address;
       this.start = start;
       this.end = end;
-      this.searchInput = input;
+      this.inputLength = inputLength;
     }
 
     @Override
     public void run() {
-      // System.out.printf("Thread: %s, memory address: %s, segment: [%d, %d]%n", Thread.currentThread().getName(), this.address, this.start, this.end);
+      // System.out.printf("Thread: %s, segment: [%d, %d]%n", Thread.currentThread().getName(), this.start, this.end);
       // final byte lastByte = this.segment.get(ValueLayout.JAVA_BYTE, this.end);
       // System.out.printf("Thread: %s, last byte is line break?: %s%n", Thread.currentThread().getName(), lastByte == '\n');
       // System.out.printf("Thread: %s, last byte: %s%n", Thread.currentThread().getName(), new String(new byte[] { lastByte }));
-
+      long word;
+      long relativePos = -1;
+      long lineBreakPos = this.end;
       long position = this.end; // scan the segment reverse
       final long loopCount = (this.end - this.start) / 8; // 8 bytes at a time
       for (int i = 0; i < loopCount; i++) {
-        position -= 8; // move pointer 8 bytes to the back
-        final long word = UNSAFE.getLong(this.address + position); // read a word of 8 bytes each time
-        final long relativePos = linebreakPos(word); // linebreak position in the word, if not returns 8
-        final long lineBreakPos = position + relativePos;
-        // there maybe redundant checks here because the linebreak position is not found always
-        // instead of adding more branches in hotspot we leave it here since compiler can optimize it well,
+        // there maybe redundant checks here because the linebreak position is not always correct
+        // when no linebreak match relativePos will be 8. In such cases, line break positions will be duplicated.
+        // Therefore, this can produce duplicated winners.
+        // However, instead of adding more branches in hotspot we leave it here since compiler can optimize it much better,
         // and it's faster due to instruction level parallelism
-        if (compare(this.address + lineBreakPos, this.searchInput)) { // found a match
+        if (relativePos !=8 && compare(this.address + lineBreakPos, this.searchInput, this.inputLength)) { // found a match
           final long start = findPreviousLinebreak(this.address, lineBreakPos - 1) + 1;
-          final long end = lineBreakPos - this.searchInput.size;
+          final long end = lineBreakPos - this.inputLength;
           printName(this.address, start, end);
         }
+
+        word = UNSAFE.getLong(this.address + position - 8); // read a word of 8 bytes each time
+        relativePos = linebreakPos(word); // linebreak position in the word, if not returns 8
+        lineBreakPos = position - 8 + relativePos;
+
+        position -= 8; // move pointer 8 bytes to the back
+      }
+    }
+  }
+
+  private static void swap(String[] elements, int a, int b) {
+    final String tmp = elements[a];
+    elements[a] = elements[b];
+    elements[b] = tmp;
+  }
+
+  private static void cacheSearchInput(String[] input) {
+    final byte[] bytes = (";" + String.join(";", input)).getBytes(); // prepend ';' to match correctly
+    inputSet.add(new TokenizedSearchInput(bytes));
+  }
+
+  // copied from: https://www.baeldung.com/java-array-permutations
+  static void generatePermutations(String[] input) {
+    cacheSearchInput(input);
+    final int n = input.length;
+    final int[] indexes = new int[n];
+    int i = 0;
+    while (i < n) {
+      if (indexes[i] < i) {
+        swap(input, i % 2 == 0 ?  0: indexes[i], i);
+        cacheSearchInput(input);
+        indexes[i]++;
+        i = 0;
+      } else {
+        indexes[i] = 0;
+        i++;
       }
     }
   }
 
   public static void main(String[] args) throws Exception {
-    // read input numbers into bytes to access via MemorySegment
-    final String numbers = String.join(";", args);
-    System.out.println("Input: " + numbers);
-
-    final byte[] bytes = (";" + numbers).getBytes(); // prepend ';' match correctly
-    final TokenizedSearchInput searchInput = new TokenizedSearchInput(bytes);
+    System.out.println("Input: " + Arrays.toString(args));
+    // build lookup table, for 6 numbers it's 6! = 720
+    // Since we do it only once at startup it's no impact on performance
+    generatePermutations(args);
 
     var concurrency = 2 * Runtime.getRuntime().availableProcessors();
     final long fileSize = Files.size(DATA_FILE);
@@ -187,17 +276,18 @@ public class MainUnsafe {
     final MemorySegment memory = channel.map(MapMode.READ_ONLY, segmentStart, fileSize, Arena.global());
     final long memoryAddress = memory.address();
 
+    final int inputLength = (";" + String.join(";", args)).getBytes().length;
     if (concurrency == 1) { // shortcut for single-thread mode
-      new RegionWorker(memoryAddress, segmentStart, fileSize, searchInput).start();
+      new RegionWorker(memoryAddress, segmentStart, fileSize, inputLength).start();
       return;
     }
 
     // calculate boundaries for regions
     for (int i = 0; i < concurrency - 1; i++) {
-      new RegionWorker(memoryAddress, segmentStart, segmentStart + regionSize, searchInput).start(); // start processing
+      new RegionWorker(memoryAddress, segmentStart, segmentStart + regionSize, inputLength).start(); // start processing
       segmentStart += regionSize;
     }
-    new RegionWorker(memoryAddress, segmentStart, fileSize, searchInput).start(); // last piece
+    new RegionWorker(memoryAddress, segmentStart, fileSize, inputLength).start(); // last piece
   }
 
 }
