@@ -9,21 +9,26 @@ import java.nio.channels.FileChannel.MapMode;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Arrays;
 
 
 /**
  * Changelog:
  *
- * Initial:                                       ~8000 ms  — strangely unstable because of IntelliJ profiler, later switched on hyperfine
- * Parallel processing:                           ~1200 ms  — traversing forward byte by byte
- * Change read direction:                         ~1200 ms  — no change but code is much cleaner
- * Read 24 bytes at a time via SWAR token checks: ~800 ms   — Big impact! The real run is 33% faster, even IntelliJ profiler shows worse. Don't trust IntelliJ!
- * Skip redundant bytes:                          ~670 ms   — Another kill! 16% faster after skipping minimum search string amount.
- * Compare by longs:                              ~620 ms   — Instead of byte scanning we scan long and ints to improve speed. 7% faster
- * Refactor main loop, constant loop count:       ~575 ms   - Loop count is always size/8 now, this way compiler can unroll the loop better
+ * Initial:                                                               ~8000 ms  — strangely unstable because of IntelliJ profiler, later switched on hyperfine
+ * Parallel processing:                                                   ~1200 ms  — traversing forward byte by byte
+ * Change read direction:                                                 ~1200 ms  — no change but code is much cleaner
+ * Read 24 bytes at a time via SWAR token checks:                         ~800 ms   — Big impact! The real run is 33% faster, even IntelliJ profiler shows worse. Don't trust IntelliJ!
+ * Skip redundant bytes:                                                  ~670 ms   — Another kill! 16% faster after skipping minimum search string amount.
+ * Compare by longs:                                                      ~620 ms   — Instead of byte scanning we scan long and ints to improve speed. 7% faster
+ * Refactor main loop, constant loop count:                               ~575 ms   - Loop count is always size/8 now, this way compiler can unroll the loop better
+ * Refine code to match numbers independently of their orders             ~2300 ms  - Back to seconds again, but matching without order is expensive
+ * Implement a lookup table, calculate possible permitations at startup:
+ *  - Use lookup table to compare in o(1)                                 ~1400ms   - Still hoping to get under 1 seconds, improving...
+ * Custom Set implementation to eleminate extra checks                    ~950ms    - Eleminating extra checks helped a lot, back under 1 second!
+ *
  *
  * Testing on JDK 21.0.5-graal JIT compiler (no native), limiting to 8 threads.
- *
  * Big thanks to Mike, for bringing this challenge.
  *
  * Follow me at: github.com/yavuztas
@@ -49,14 +54,6 @@ public class Main {
     return position;
   }
 
-  private static long findNextLineBreak(MemorySegment memory, long offset) {
-    long position = offset;
-    while (memory.get(ValueLayout.JAVA_BYTE, position) != '\n') { // read until a linebreak
-      position++;
-    }
-    return position;
-  }
-
   // hasvalue & haszero
   // adapted from https://graphics.stanford.edu/~seander/bithacks.html#ZeroInWord
   // returns [0-7] otherwise 8 when no match
@@ -66,55 +63,107 @@ public class Main {
     return Long.numberOfTrailingZeros(((hasVal - 0x0101010101010101L) & ~hasVal & 0x8080808080808080L)) >>> 3; // haszero
   }
 
-  private static boolean compare(MemorySegment segment, long offset, TokenizedSearchInput search) {
-    long segmentStart = offset;
-    int pos = search.size;
+  static final InputSet inputSet = new InputSet();
 
-    // safely read 8 + 4 = 12 bytes without looping since the search string is minimum 12
-    final long long1 = search.firstLong;
-    final long long2 = segment.get(ValueLayout.JAVA_LONG_UNALIGNED, segmentStart - 8);
-    if (long1 != long2) { // mismatch
-      return false;
+  private static boolean compare(MemorySegment segment, long offset, TokenizedSearchInput searchInput, int inputLength) {
+    // get the first 2 bytes, this includes the first ';' as well
+    final short firstShort = segment.get(ValueLayout.JAVA_SHORT_UNALIGNED, offset - inputLength); // read 2 bytes
+    final long firstLong = segment.get(ValueLayout.JAVA_LONG_UNALIGNED, offset - 8); // first long from backwards
+    final long secondLong = segment.get(ValueLayout.JAVA_LONG_UNALIGNED, offset - inputLength + 2); // second long from backwards
+
+    // reuse search input and check it from lookup cache
+    return inputSet.contains(searchInput.reset(firstShort, firstLong, secondLong));
+  }
+
+  // Custome Set on purpose, less possible checks
+  static final class InputSet {
+
+    // Bigger bucket size less collisions, but you have to find a sweet spot otherwise it becomes slower.
+    private static final int SIZE = 1 << 14; // 16kb
+    private static final int BITMASK = SIZE - 1;
+    private final TokenizedSearchInput[] values = new TokenizedSearchInput[SIZE];
+
+    private static int hashBucket(int hash) {
+      hash = hash ^ (hash >>> 16); // naive bit spreading but surprisingly decreases collision :)
+      return hash & BITMASK; // fast modulo, to find bucket
     }
 
-    final int int1 = search.secondInt;
-    final int int2 = segment.get(ValueLayout.JAVA_INT_UNALIGNED, segmentStart - 12);
-    if (int1 != int2) { // mismatch
-      return false;
+    void add(TokenizedSearchInput input) {
+      final int bucket = hashBucket(input.hashCode());
+      TokenizedSearchInput existing = this.values[bucket];
+      if (existing == null) {
+        this.values[bucket] = input;
+        return;
+      }
+      // collision, linear probing to find a slot
+      // NOTE: here we don't do equals check on purpose since we don't add the same input twice
+      // If we do same input will be added twice but we don't, never :)
+      while (existing.next != null) {
+        existing = existing.next;
+      }
+      existing.next = input;
     }
-    // udpate positions
-    segmentStart -= 13;
-    pos -= 13;
-    // scan the rest byte by byte
-    while (pos >= 0) {
-      final byte b1 = search.bytes[pos];
-      // TODO boundery check for segment?
-      final byte b2 = segment.get(ValueLayout.JAVA_BYTE, segmentStart);
-      if (b1 != b2) { // mismatch
+
+    boolean contains(TokenizedSearchInput input) {
+      final int bucket = hashBucket(input.hashCode());
+      TokenizedSearchInput existing = this.values[bucket];
+      if (existing == null) {
         return false;
       }
-      pos--;
-      segmentStart--;
-    }
 
-    return true;
+      boolean contains = false;
+      while (!contains && existing != null) {
+        contains = existing.equals(input);
+        existing = existing.next;
+      }
+      return contains;
+    }
   }
 
   static class TokenizedSearchInput {
 
-    final int size;
-    final byte[] bytes;
+    // linked list for collisions
+    TokenizedSearchInput next;
 
-    // cache the first 12 byte: long + int
-    final long firstLong;
-    final int secondInt;
+    // split bytes into 2 + 8 + 8 (short, long, long)
+    short firstShort;
+    long firstLong;
+    long secondLong;
+
+    public TokenizedSearchInput() {
+      this.firstShort = 0;
+      this.firstLong = 0;
+      this.secondLong = 0;
+    }
 
     public TokenizedSearchInput(byte[] bytes) {
       final MemorySegment segment = MemorySegment.ofArray(bytes);
-      this.size = bytes.length;
-      this.bytes = bytes;
-      this.firstLong = segment.get(ValueLayout.JAVA_LONG_UNALIGNED, this.size - 8); // from backwards
-      this.secondInt = segment.get(ValueLayout.JAVA_INT_UNALIGNED, this.size - 12); // from backwards
+      this.firstShort = segment.get(ValueLayout.JAVA_SHORT_UNALIGNED, 0); // first 2 bytes excluding empty bytes
+      this.firstLong = segment.get(ValueLayout.JAVA_LONG_UNALIGNED, bytes.length - 8); // from backwards
+      this.secondLong = segment.get(ValueLayout.JAVA_LONG_UNALIGNED, 2); // right after first 2 bytes
+    }
+
+    TokenizedSearchInput reset(short firstShort, long firstLong, long secondLong) {
+      this.firstShort = firstShort;
+      this.firstLong = firstLong;
+      this.secondLong = secondLong;
+      return this;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      final TokenizedSearchInput that = (TokenizedSearchInput) o;
+      return this.firstShort == that.firstShort && this.firstLong == that.firstLong && this.secondLong == that.secondLong;
+    }
+
+    @Override
+    public int hashCode() {
+      int result = 1;
+      // mersenne prime 31
+      result = ((result << 5) - result) + this.firstShort;
+      result = ((result << 5) - result) + Long.hashCode(this.firstLong);
+      result = ((result << 5) - result) + Long.hashCode(this.secondLong);
+      return result;
     }
   }
 
@@ -123,13 +172,16 @@ public class Main {
     final MemorySegment segment;
     final long start;
     final long end;
-    final TokenizedSearchInput searchInput;
 
-    public RegionWorker(MemorySegment memory, long start, long end, TokenizedSearchInput input) {
+    final TokenizedSearchInput searchInput = new TokenizedSearchInput();
+    final TokenizedSearchInput searchInput2 = new TokenizedSearchInput();
+    final int inputLength;
+
+    public RegionWorker(MemorySegment memory, long start, long end, int inputLength) {
       this.segment = memory;
       this.start = start;
       this.end = end;
-      this.searchInput = input;
+      this.inputLength = inputLength;
     }
 
     @Override
@@ -138,37 +190,67 @@ public class Main {
       // final byte lastByte = this.segment.get(ValueLayout.JAVA_BYTE, this.end);
       // System.out.printf("Thread: %s, last byte is line break?: %s%n", Thread.currentThread().getName(), lastByte == '\n');
       // System.out.printf("Thread: %s, last byte: %s%n", Thread.currentThread().getName(), new String(new byte[] { lastByte }));
+      long word;
+      long relativePos;
       long lineBreakPos = this.end;
       long position = this.end; // scan the segment reverse
       final long loopCount = (this.end - this.start) / 8; // 8 bytes at a time
       for (int i = 0; i < loopCount; i++) {
         // there maybe redundant checks here because the linebreak position is not always correct
-        // when no linebreak match relativePos will be 8. In such cases found line break positions will be duplicated.
+        // when no linebreak match relativePos will be 8. In such cases, line break positions will be duplicated.
         // Therefore, this can produce duplicated winners.
         // However, instead of adding more branches in hotspot we leave it here since compiler can optimize it much better,
         // and it's faster due to instruction level parallelism
-        if (compare(this.segment, lineBreakPos, this.searchInput)) { // found a match
+        if (compare(this.segment, lineBreakPos, this.searchInput, this.inputLength)) { // found a match
           final long start = findPreviousLinebreak(this.segment, lineBreakPos - 1) + 1;
-          final long end = lineBreakPos - this.searchInput.size;
+          final long end = lineBreakPos - this.inputLength;
           printName(this.segment, start, end);
         }
         position -= 8; // move pointer 8 bytes to the back
-        final long word = this.segment.get(ValueLayout.JAVA_LONG_UNALIGNED, position); // read a word of 8 bytes each time
-        final long relativePos = linebreakPos(word); // linebreak position in the word, if not returns 8
+        word = this.segment.get(ValueLayout.JAVA_LONG_UNALIGNED, position); // read a word of 8 bytes each time
+        relativePos = linebreakPos(word); // linebreak position in the word, if not returns 8
         lineBreakPos = position + relativePos;
       }
     }
   }
 
+  private static void swap(String[] elements, int a, int b) {
+    final String tmp = elements[a];
+    elements[a] = elements[b];
+    elements[b] = tmp;
+  }
+
+  private static void cacheSearchInput(String[] input) {
+    final byte[] bytes = (";" + String.join(";", input)).getBytes(); // prepend ';' to match correctly
+    inputSet.add(new TokenizedSearchInput(bytes));
+  }
+
+  // copied from: https://www.baeldung.com/java-array-permutations
+  static void generatePermutations(String[] input) {
+    cacheSearchInput(input);
+    final int n = input.length;
+    final int[] indexes = new int[n];
+    int i = 0;
+    while (i < n) {
+      if (indexes[i] < i) {
+        swap(input, i % 2 == 0 ?  0: indexes[i], i);
+        cacheSearchInput(input);
+        indexes[i]++;
+        i = 0;
+      } else {
+        indexes[i] = 0;
+        i++;
+      }
+    }
+  }
+
   public static void main(String[] args) throws Exception {
-    // read input numbers into bytes to access via MemorySegment
-    final String numbers = String.join(";", args);
-    System.out.println("Input: " + numbers);
+    System.out.println("Input: " + Arrays.toString(args));
+    // build lookup table, for 6 numbers it's 6! = 720
+    // Since we do it only once at startup it's no impact on performance
+    generatePermutations(args);
 
-    final byte[] bytes = (";" + numbers).getBytes(); // prepend ';' match correctly
-    final TokenizedSearchInput searchInput = new TokenizedSearchInput(bytes);
-
-    var concurrency = 2 * Runtime.getRuntime().availableProcessors();
+    var concurrency = 8; //2 * Runtime.getRuntime().availableProcessors();
     final long fileSize = Files.size(DATA_FILE);
     long regionSize = fileSize / concurrency;
 
@@ -185,17 +267,18 @@ public class Main {
     final FileChannel channel = (FileChannel) Files.newByteChannel(DATA_FILE, StandardOpenOption.READ);
     final MemorySegment memory = channel.map(MapMode.READ_ONLY, segmentStart, fileSize, Arena.global());
 
+    final int inputLength = (";" + String.join(";", args)).getBytes().length;
     if (concurrency == 1) { // shortcut for single-thread mode
-      new RegionWorker(memory, segmentStart, fileSize, searchInput).start();
+      new RegionWorker(memory, segmentStart, fileSize, inputLength).start();
       return;
     }
 
     // calculate boundaries for regions
     for (int i = 0; i < concurrency - 1; i++) {
-      new RegionWorker(memory, segmentStart, segmentStart + regionSize, searchInput).start(); // start processing
+      new RegionWorker(memory, segmentStart, segmentStart + regionSize, inputLength).start(); // start processing
       segmentStart += regionSize;
     }
-    new RegionWorker(memory, segmentStart, fileSize, searchInput).start(); // last piece
+    new RegionWorker(memory, segmentStart, fileSize, inputLength).start(); // last piece
   }
 
 }
