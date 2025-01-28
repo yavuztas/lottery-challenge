@@ -27,6 +27,7 @@ import java.util.Arrays;
  *  - Use lookup table to compare in o(1)                                 ~1400ms   - Still hoping to get under 1 seconds, improving...
  * Custom Set implementation to eleminate extra checks                    ~950ms    - Eleminating extra checks helped a lot, back under 1 second!
  * Increase bucket size, adjust JVM options                               ~870ms    - increasing bucket size from 16K to 256K eleminates collisions (almost) and gives us ~80ms bonus
+ * Micro optimizations                                                    ~810ms    - eleminate redundant compare check in some cases
  *
  *
  * Testing on JDK 21.0.5-graal JIT compiler (no native), limiting to 8 threads.
@@ -206,7 +207,7 @@ public class Main {
           final long end = lineBreakPos - this.inputLength;
           printName(this.segment, start, end);
         }
-        
+
         word = this.segment.get(ValueLayout.JAVA_LONG_UNALIGNED, position - 8); // read a word of 8 bytes each time
         relativePos = linebreakPos(word); // linebreak position in the word, if not returns 8
         lineBreakPos = position - 8 + relativePos;
