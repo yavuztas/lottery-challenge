@@ -175,7 +175,6 @@ public class Main {
     final long end;
 
     final TokenizedSearchInput searchInput = new TokenizedSearchInput();
-    final TokenizedSearchInput searchInput2 = new TokenizedSearchInput();
     final int inputLength;
 
     public RegionWorker(MemorySegment memory, long start, long end, int inputLength) {
