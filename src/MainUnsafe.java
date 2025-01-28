@@ -19,9 +19,9 @@ import sun.misc.Unsafe;
  *
  * Testing on JDK 21.0.5-graal, Mac M4 ARM 10 Core CPU: 768K L1i, 512K L1d, 64MB L2, 8MB System Level Cache
  *
- * JIT compiler (no native), 8 cores    : 538 ms
+ * JIT compiler (no native), 8 cores    : 790 ms
  * JIT compiler (no native), 10 cores   : 688 ms
- * Graalvm Native image, 8 cores        : 390 ms
+ * Graalvm Native image, 8 cores        : 623 ms
  * Graalvm Native image, 10 cores       : 540 ms
  *
  * Big thanks to Mike, for bringing this challenge.
@@ -258,7 +258,7 @@ public class MainUnsafe {
     // Since we do it only once at startup it's no impact on performance
     generatePermutations(args);
 
-    var concurrency = 2 * Runtime.getRuntime().availableProcessors();
+    var concurrency = 8;//2 * Runtime.getRuntime().availableProcessors();
     final long fileSize = Files.size(DATA_FILE);
     long regionSize = fileSize / concurrency;
 
